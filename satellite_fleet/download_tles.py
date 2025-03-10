@@ -24,9 +24,11 @@ from typing import List, Dict
 import pickle
 
 # Configs
-from config import get_logger, space_track_login as login, SATELLITE_DIR
+from config import get_logger, space_track_login as login, SATELLITE_DIR, CONSTELLATIONS
 
 logger = get_logger(__name__, log_file="download_tles.log")
+
+eph = load(str(SATELLITE_DIR / "de421.bsp"))
 
 
 # %%
@@ -334,8 +336,26 @@ def find_valid_tle(time, tle_intervals, sorted_tles):
     return sorted_tles[0] if sorted_tles else None
 
 
+def is_in_earth_shadow(satellite, t, eph):
+    """
+    Determine if a satellite is in Earth's shadow using Skyfield.
+    The satellite is in shadow if it is not sunlit.
+
+    Args:
+        satellite: A Skyfield satellite object (e.g., from TLE propagation).
+        t: A Skyfield Time object.
+        eph: An ephemeris (e.g., loaded from 'de421.bsp').
+
+    Returns:
+        bool: True if the satellite is in Earth's shadow, False otherwise.
+    """
+    return not satellite.at(t).is_sunlit(eph)
+
+
 def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end):
     """Process single satellite data with added velocities and Cartesian coordinates"""
+    logger.info(f"Processing satellite {sat_id}...")
+    # Load timescale once
     # Pre-compute time objects
     ts_times = [
         ts.utc(t.year, t.month, t.day, t.hour, t.minute, t.second) for t in time_steps
@@ -357,6 +377,7 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
         "z": np.zeros(n_steps),
     }
     valid_indices = []
+    is_in_shadow = np.zeros(n_steps)
 
     # Preprocess TLE data
     sorted_tles, tle_intervals = preprocess_tle_data(
@@ -377,7 +398,6 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
             longitudes[i] = subpoint.longitude.degrees
             altitudes[i] = subpoint.elevation.km
 
-            # Convert to Earth-fixed (ECEF) frame for drag calculations
             # Convert to Earth-fixed (ECEF) frame for drag calculations
             itrs_position = position.frame_xyz(itrs)
             x_ecef, y_ecef, z_ecef = itrs_position.km
@@ -407,6 +427,9 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
             velocities["vy"][i] = vy
             velocities["vz"][i] = vz
 
+            in_shadow = is_in_earth_shadow(sat_obj, ts_time, eph)
+            is_in_shadow[i] = in_shadow
+
             valid_indices.append(i)
 
     # Trim arrays to valid indices
@@ -416,6 +439,7 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
         longitudes = longitudes[valid_indices]
         altitudes = altitudes[valid_indices]
         times = [time_steps[i] for i in valid_indices]
+        is_in_shadow = is_in_shadow[valid_indices]
 
         for key in velocities:
             velocities[key] = velocities[key][valid_indices].tolist()
@@ -438,6 +462,7 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
         "mean_altitude": np.nanmean(altitudes) if len(altitudes) > 0 else None,
         "median_altitude": np.nanmedian(altitudes) if len(altitudes) > 0 else None,
         "altitude_change": np.ptp(altitudes) if len(altitudes) > 0 else None,
+        "is_in_shadow": is_in_shadow.tolist(),
     }
 
 
@@ -488,7 +513,8 @@ def calculate_satellite_altitudes_parallel(
                 sat_id, result = future.result()
                 altitude_data[sat_id] = result
             except Exception as e:
-                logger.error(f"Error processing satellite {sat_id}: {e}")
+                failed_sat_id = futures[future]
+                logger.error(f"Error processing satellite {failed_sat_id}: {e}")
                 continue
 
     return altitude_data
@@ -501,9 +527,7 @@ if __name__ == "__main__":
     storm_start = datetime(2024, 5, 9)
     storm_end = datetime(2024, 5, 13)
 
-    # Download oneweb, kuiper, and starlink data
-    constellations = ["ONEWEB", "KUIPER", "STARLINK"]
-    resolution = 30
+    resolution = 10
 
     # Fetch and process satellite data
     satellite_alts = process_and_save_satellite_data(
@@ -511,7 +535,7 @@ if __name__ == "__main__":
         password,
         storm_start,
         storm_end,
-        constellations=constellations,
+        constellations=CONSTELLATIONS,
         resolution=resolution,
     )
     logger.info("Done!")

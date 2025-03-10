@@ -1,7 +1,23 @@
 # %%
 import numpy as np
 import pandas as pd
+import pickle
+import itertools
 from see_rate import load_and_process_data
+from config.settings import DATA_DIR, get_logger, LOG_DIR, CONSTELLATIONS, SATELLITE_DIR
+from skyfield.api import load, EarthSatellite
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# Satellite altitudes
+logger = get_logger(__name__, log_file=LOG_DIR / "let.log")
+logger.info("Loading satellite altitudes...")
+sat_alts_path = SATELLITE_DIR / "satellite_alts.pkl"
+
+with open(sat_alts_path, "rb") as f:
+    satellite_alts = pickle.load(f)
+
+
+eph = load(str(SATELLITE_DIR / "de421.bsp"))
 
 
 # %%
@@ -266,6 +282,84 @@ def compute_dose(differential_let_df, dt_seconds):
     return dose_series
 
 
+def apply_stormer_scaling(df_flux, lat, rigidity_ref=14.5, k=95, alpha=0.7):
+    # Compute cutoff rigidity (GV) using a simplified Stormer formula
+    R_c = rigidity_ref * (np.cos(np.radians(lat)) ** 4)
+    # Convert cutoff rigidity to an energy threshold (MeV); assume 1 GV ~ 1000 MeV
+    E_cut = R_c * 1000.0
+
+    scaled_df = df_flux.copy()
+    for col in df_flux.columns:
+        try:
+            let_val = float(col.split("_")[1])
+        except Exception:
+            continue
+        # Invert LET = k / (E^alpha)  ->  E = (k / LET)^(1/alpha)
+        E_bin = (k / let_val) ** (1 / alpha)
+        # If the representative energy is below the cutoff, scale flux by E_bin/E_cut; otherwise, use full flux.
+        scale_factor = E_bin / E_cut if E_bin < E_cut else 1.0
+        scaled_df[col] *= scale_factor
+    return scaled_df
+
+
+def process_single_satellite(
+    constellation, sat_id, sat_info, let_diff, params, dt_seconds
+):
+    sat_times = pd.to_datetime(sat_info["times"])
+    sat_lats = np.array(sat_info["latitudes"])
+    # Earth shadow flag: 0 = sunlit, 1 = in shadow
+    shadow_flag = sat_info.get("is_in_shadow", 0)
+    shadow_scale = 0.1 if shadow_flag == 1 else 1.0
+
+    # Reindex global differential LET to satellite times
+    sat_flux = let_diff.reindex(sat_times, method="nearest")
+    scaled_rows = []
+    for i, t in enumerate(sat_times):
+        # Apply Stormer scaling for current time based on latitude
+        stormer_scaled = apply_stormer_scaling(sat_flux.iloc[[i]], sat_lats[i])
+        scaled_row = stormer_scaled * shadow_scale
+        scaled_rows.append(scaled_row.iloc[0])
+    scaled_flux = pd.DataFrame(scaled_rows, index=sat_times, columns=sat_flux.columns)
+
+    # Recompute integrated LET from the scaled differential LET
+    scaled_integral = compute_integral_let_spectrum(scaled_flux)
+    upset_ts = calculate_upset_rate_time_series(scaled_integral, params)
+    dose_ts = compute_dose(scaled_flux, dt_seconds)
+
+    return (constellation, sat_id, {"upset": upset_ts, "dose": dose_ts})
+
+
+def compute_dose_radiation_all_assets(satellite_alts, dt_seconds, params):
+    # Load global flux data and build LET spectra
+    df_soho, df_stereo, df_epam = load_and_process_data()
+    global_dt = pd.DatetimeIndex(pd.to_datetime(df_soho["datetime"])).tz_localize("UTC")
+    let_diff = energy_to_let_spectrum_combined(df_stereo, df_epam)
+    let_diff.index = global_dt
+
+    results = {}
+    futures = []
+    with ProcessPoolExecutor(max_workers=12) as executor:
+        for constellation in CONSTELLATIONS:
+            sat_dict = satellite_alts[constellation]
+            for sat_id, sat_info in sat_dict.items():
+                futures.append(
+                    executor.submit(
+                        process_single_satellite,
+                        constellation,
+                        sat_id,
+                        sat_info,
+                        let_diff,
+                        params,
+                        dt_seconds,
+                    )
+                )
+        for future in as_completed(futures):
+            constellation, sat_id, res = future.result()
+            results.setdefault(constellation, {})[sat_id] = res
+
+    return results
+
+
 # %%
 if __name__ == "__main__":
 
@@ -278,28 +372,44 @@ if __name__ == "__main__":
     # 2) Convert to integral LET (F(>=L))
     let_integral = compute_integral_let_spectrum(let_differential)
 
-    # 3 Parameters
-    params = {
+    dt_seconds = 5 * 60  # 5 minutes
+
+    # Define baseline parameters and parameter ranges for sensitivity analysis
+    baseline_params = {
         "length": 10,  # μm
         "width": 10,  # μm
         "height": 10,  # μm
         "density": 2.328,  # g/cm³ (Silicon)
-        "X_e_ratio": 3.6 / 1.602e-19,  # eV/C, ~2.248e19
+        "X_e_ratio": 3.6 / 1.602e-19,  # eV/C
         "Qc": 0.1,  # pC
         "beta": 0.5,  # 50% shielding
         "lambda_base": 1 / 1000,  # base fail probability
         "n_components": 50,
     }
-    
-    # To account for umbra/penumbra, we can use a Weibull distributin
-    # To also account for Stormer cutoff, we can use a Gaussian distribution
 
-    # 4) Compute time-series upset/failure rates
-    results_df = calculate_upset_rate_time_series(let_integral, params)
-        
-    dt_seconds = 5 * 60  # 5 minutes
-    # Compute dose (J/kg) for each time step
-    dose_series = compute_dose(let_differential, dt_seconds)
-    print(results_df)
+    n_components_values = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    lambda_base_values = [1 / 2000, 1 / 1500, 1 / 1000, 1 / 500]
+    beta_values = [0.3, 0.5, 0.7]
+
+    results_dict = {}
+
+    for n_comp, lam_base, beta in itertools.product(
+        n_components_values, lambda_base_values, beta_values
+    ):
+        params_mod = baseline_params.copy()
+        params_mod["n_components"] = n_comp
+        params_mod["lambda_base"] = lam_base
+        params_mod["beta"] = beta
+
+        results = compute_dose_radiation_all_assets(
+            satellite_alts, dt_seconds, params_mod
+        )
+
+        key = (n_comp, lam_base, beta)
+        results_dict[key] = results
+    # Save the sensitivity analysis results to a pickle file
+    with open("sensitivity_results.pkl", "wb") as f:
+        pickle.dump(results_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+
 
 # %%

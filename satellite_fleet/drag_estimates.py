@@ -9,7 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from satellite_fleet.download_tles import process_and_save_satellite_data
 
-from config import get_logger, space_track_login as login, SATELLITE_DIR, FIGURE_DIR
+from config import (
+    get_logger,
+    space_track_login as login,
+    SATELLITE_DIR,
+    FIGURE_DIR,
+    CONSTELLATIONS,
+)
 
 from dataclasses import dataclass, field
 import pickle
@@ -24,10 +30,8 @@ from viz import plot_propellant_by_constellation
 class SatelliteAltitudes:
     storm_start: datetime = datetime(2024, 5, 9)
     storm_end: datetime = datetime(2024, 5, 13)
-    constellations: list = field(
-        default_factory=lambda: ["ONEWEB", "KUIPER", "STARLINK"]
-    )
-    resolution: int = 30
+    constellations: list = field(default_factory=lambda: CONSTELLATIONS)
+    resolution: int = 10
     satellite_alts_path: Path = field(
         default_factory=lambda: SATELLITE_DIR / "satellite_alts.pkl"
     )

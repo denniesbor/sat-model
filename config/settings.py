@@ -37,6 +37,9 @@ NETWORK_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = ROOT_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
+# CONSTELLATIONS (TO add more)
+CONSTELLATIONS = ["ONEWEB", "KUIPER", "STARLINK", "TELESAT"]
+
 
 def get_logger(name=__name__, log_file=None, level=logging.INFO):
     """

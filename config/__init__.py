@@ -7,6 +7,7 @@ from .settings import (
     ECONOMIC_DIR,
     LOG_DIR,
     NETWORK_DIR,
+    CONSTELLATIONS,
     get_logger,
     space_track_login,
 )
