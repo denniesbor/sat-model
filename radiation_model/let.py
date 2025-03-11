@@ -1,12 +1,21 @@
 # %%
 import numpy as np
 import pandas as pd
+import os
+import random
+from tqdm import tqdm
 import pickle
 import itertools
 from see_rate import load_and_process_data
 from config.settings import DATA_DIR, get_logger, LOG_DIR, CONSTELLATIONS, SATELLITE_DIR
 from skyfield.api import load, EarthSatellite
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import subprocess
+
+# Check if file in the network dir
+remote_user = "dennies-bor"
+remote_host = "home-dkbor"
+remote_dir = "/home/dennies-bor/Desktop/sate_model"
 
 # Satellite altitudes
 logger = get_logger(__name__, log_file=LOG_DIR / "let.log")
@@ -18,6 +27,8 @@ with open(sat_alts_path, "rb") as f:
 
 
 eph = load(str(SATELLITE_DIR / "de421.bsp"))
+simulation_dir = SATELLITE_DIR / "simulation_data"
+simulation_dir.mkdir(exist_ok=True)
 
 
 # %%
@@ -283,22 +294,24 @@ def compute_dose(differential_let_df, dt_seconds):
 
 
 def apply_stormer_scaling(df_flux, lat, rigidity_ref=14.5, k=95, alpha=0.7):
-    # Compute cutoff rigidity (GV) using a simplified Stormer formula
+    # Compute cutoff rigidity (GV) using a vectorized Stormer formula
     R_c = rigidity_ref * (np.cos(np.radians(lat)) ** 4)
-    # Convert cutoff rigidity to an energy threshold (MeV); assume 1 GV ~ 1000 MeV
-    E_cut = R_c * 1000.0
+    E_cut = R_c * 1000.0  # Convert cutoff rigidity to energy threshold (MeV)
 
-    scaled_df = df_flux.copy()
-    for col in df_flux.columns:
-        try:
-            let_val = float(col.split("_")[1])
-        except Exception:
-            continue
-        # Invert LET = k / (E^alpha)  ->  E = (k / LET)^(1/alpha)
-        E_bin = (k / let_val) ** (1 / alpha)
-        # If the representative energy is below the cutoff, scale flux by E_bin/E_cut; otherwise, use full flux.
-        scale_factor = E_bin / E_cut if E_bin < E_cut else 1.0
-        scaled_df[col] *= scale_factor
+    # Extract LET values from column names using vectorized operations
+    let_vals = np.array(
+        [float(col.split("_")[1]) if "_" in col else np.nan for col in df_flux.columns]
+    )
+
+    # Compute representative energy for each LET value
+    E_bin = (k / let_vals) ** (1 / alpha)
+
+    # Compute scale factor matrix for all latitudes and LET values
+    scale_factors = np.where(E_bin < E_cut[:, None], E_bin / E_cut[:, None], 1.0)
+
+    # Apply scaling efficiently using broadcasting
+    scaled_df = df_flux * scale_factors
+
     return scaled_df
 
 
@@ -307,21 +320,23 @@ def process_single_satellite(
 ):
     sat_times = pd.to_datetime(sat_info["times"])
     sat_lats = np.array(sat_info["latitudes"])
-    # Earth shadow flag: 0 = sunlit, 1 = in shadow
-    shadow_flag = sat_info.get("is_in_shadow", 0)
-    shadow_scale = 0.1 if shadow_flag == 1 else 1.0
+    shadow_flag = np.array(
+        sat_info.get("is_in_shadow", np.zeros_like(sat_times))
+    )  # Ensure array compatibility
+    shadow_scale = np.where(shadow_flag == 1, 0.1, 1.0)  # Vectorized scaling
 
-    # Reindex global differential LET to satellite times
+    # Reindex global differential LET to satellite times using nearest method
     sat_flux = let_diff.reindex(sat_times, method="nearest")
-    scaled_rows = []
-    for i, t in enumerate(sat_times):
-        # Apply Stormer scaling for current time based on latitude
-        stormer_scaled = apply_stormer_scaling(sat_flux.iloc[[i]], sat_lats[i])
-        scaled_row = stormer_scaled * shadow_scale
-        scaled_rows.append(scaled_row.iloc[0])
-    scaled_flux = pd.DataFrame(scaled_rows, index=sat_times, columns=sat_flux.columns)
 
-    # Recompute integrated LET from the scaled differential LET
+    # Apply Stormer scaling for all times at once
+    stormer_scaled = apply_stormer_scaling(
+        sat_flux, sat_lats
+    )  # Assuming function supports vectorization
+    scaled_flux = stormer_scaled.multiply(
+        shadow_scale, axis=0
+    )  # Element-wise multiplication
+
+    # Compute integrated LET and other values
     scaled_integral = compute_integral_let_spectrum(scaled_flux)
     upset_ts = calculate_upset_rate_time_series(scaled_integral, params)
     dose_ts = compute_dose(scaled_flux, dt_seconds)
@@ -329,16 +344,15 @@ def process_single_satellite(
     return (constellation, sat_id, {"upset": upset_ts, "dose": dose_ts})
 
 
-def compute_dose_radiation_all_assets(satellite_alts, dt_seconds, params):
-    # Load global flux data and build LET spectra
-    df_soho, df_stereo, df_epam = load_and_process_data()
-    global_dt = pd.DatetimeIndex(pd.to_datetime(df_soho["datetime"])).tz_localize("UTC")
-    let_diff = energy_to_let_spectrum_combined(df_stereo, df_epam)
-    let_diff.index = global_dt
+def compute_dose_radiation_all_assets(satellite_alts, dt_seconds, params, let_diff):
 
     results = {}
     futures = []
-    with ProcessPoolExecutor(max_workers=12) as executor:
+
+    total_sats = sum(len(satellite_alts[const]) for const in CONSTELLATIONS)
+    logger.info(f"Processing {total_sats} satellites...")
+
+    with ProcessPoolExecutor(max_workers=6) as executor:
         for constellation in CONSTELLATIONS:
             sat_dict = satellite_alts[constellation]
             for sat_id, sat_info in sat_dict.items():
@@ -353,28 +367,37 @@ def compute_dose_radiation_all_assets(satellite_alts, dt_seconds, params):
                         dt_seconds,
                     )
                 )
-        for future in as_completed(futures):
-            constellation, sat_id, res = future.result()
-            results.setdefault(constellation, {})[sat_id] = res
 
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Processing Satellites"
+        ):
+            try:
+                constellation, sat_id, res = future.result()
+                results.setdefault(constellation, {})[sat_id] = res
+            except Exception as e:
+                logger.error(f"Error processing satellite: {e}")
+
+    logger.info("Finished processing all satellites.")
     return results
 
 
 # %%
 if __name__ == "__main__":
 
+    # Define return periods to scale fluxes
+    return_periods = [30, 50, 75, 100, 150, 250]
+    baseline_period = 30  # Given event is a 1/30-year event
+    gamma = 0.4  # Scaling exponent (adjustable)
+
+    # Load initial flux data
     df_soho, df_stereo, df_epam = load_and_process_data()
-    datetime = df_soho.datetime
-
-    # 1) Build differential LET (dF/dL)
-    let_differential = energy_to_let_spectrum_combined(df_stereo, df_epam)
-
-    # 2) Convert to integral LET (F(>=L))
-    let_integral = compute_integral_let_spectrum(let_differential)
+    global_dt = pd.DatetimeIndex(pd.to_datetime(df_soho["datetime"])).tz_localize("UTC")
+    let_differential_base = energy_to_let_spectrum_combined(df_stereo, df_epam)
+    let_differential_base.index = global_dt  # Baseline 1/30-year event
 
     dt_seconds = 5 * 60  # 5 minutes
 
-    # Define baseline parameters and parameter ranges for sensitivity analysis
+    # Define baseline parameters
     baseline_params = {
         "length": 10,  # μm
         "width": 10,  # μm
@@ -391,25 +414,67 @@ if __name__ == "__main__":
     lambda_base_values = [1 / 2000, 1 / 1500, 1 / 1000, 1 / 500]
     beta_values = [0.3, 0.5, 0.7]
 
-    results_dict = {}
+    param_combinations = list(
+        itertools.product(n_components_values, lambda_base_values, beta_values)
+    )
+    logger.info(f"Total parameter combinations to process: {len(param_combinations)}")
 
-    for n_comp, lam_base, beta in itertools.product(
-        n_components_values, lambda_base_values, beta_values
-    ):
-        params_mod = baseline_params.copy()
-        params_mod["n_components"] = n_comp
-        params_mod["lambda_base"] = lam_base
-        params_mod["beta"] = beta
+    # Dictionary to store all results
+    all_results = {}
 
-        results = compute_dose_radiation_all_assets(
-            satellite_alts, dt_seconds, params_mod
+    n_sample = 5  # Number of parameter sets to sample per return period
+
+    for T in return_periods:
+        scaling_factor = (baseline_period / T) ** gamma
+        let_differential_scaled = let_differential_base * scaling_factor
+
+        logger.info(
+            f"Processing for 1/{T}-year event (scaling factor: {scaling_factor:.4f})"
         )
+        all_results[T] = {}
 
-        key = (n_comp, lam_base, beta)
-        results_dict[key] = results
-    # Save the sensitivity analysis results to a pickle file
-    with open("sensitivity_results.pkl", "wb") as f:
-        pickle.dump(results_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+        # Sample a subset of parameter combinations for stratified coverage
+        sampled_param_combinations = random.sample(param_combinations, n_sample)
 
+        for n_comp, lam_base, beta in tqdm(
+            sampled_param_combinations, desc=f"1/{T}-year Sensitivity Analysis"
+        ):
+            filename = (
+                simulation_dir
+                / f"sensitivity_results_{T}yr_{n_comp}_{lam_base}_{beta}.pkl"
+            )
+
+            if os.path.exists(filename):
+                logger.info(f"Skipping existing file: {filename} (local)")
+                continue
+
+            remote_filename = (
+                f"{remote_user}@{remote_host}:{remote_dir}/{filename.name}"
+            )
+            check_cmd = (
+                f"ssh {remote_user}@{remote_host} '[ -f {remote_dir}/{filename.name} ]'"
+            )
+            result = subprocess.run(check_cmd, shell=True, capture_output=True)
+            if result.returncode == 0:
+                logger.info(f"Skipping existing file: {filename} (remote)")
+                continue
+
+            params_mod = baseline_params.copy()
+            params_mod["n_components"] = n_comp
+            params_mod["lambda_base"] = lam_base
+            params_mod["beta"] = beta
+
+            logger.info(
+                f"Processing n_components={n_comp}, lambda_base={lam_base}, beta={beta} for 1/{T}-year event"
+            )
+            results = compute_dose_radiation_all_assets(
+                satellite_alts, dt_seconds, params_mod, let_differential_scaled
+            )
+            key = (n_comp, lam_base, beta)
+            all_results[T][key] = results
+
+            with open(filename, "wb") as f:
+                pickle.dump({key: results}, f, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.info(f"Saved results for 1/{T}-year event to {filename}")
 
 # %%
