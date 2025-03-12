@@ -53,18 +53,12 @@ class InputOutputModel:
         """
         Load the input data.
         """
-        # Technical coefficients matrix
         self.technology_matrix = pd.read_csv(
             os.path.join(self.data_path, "direct_requirements.csv")
         )
 
-        # A matrix (trim the value added in the I-O matrix)
         self.A = self.technology_matrix.iloc[:15].to_numpy()
-
-        # Identity matrix
         self.I = np.eye(self.A.shape[1])
-
-        # Real 2022 US gross output by industries (in billion dollars)
         self.industry_output = (
             pd.read_csv(
                 os.path.join(self.data_path, "us_gross_output.csv"), usecols=["2022Q3"]

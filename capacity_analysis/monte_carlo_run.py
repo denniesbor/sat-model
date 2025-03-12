@@ -8,10 +8,8 @@ from collections import defaultdict
 from capacity_analysis.io_model import InputOutputModel
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from numba import jit
-from tqdm import tqdm
 from config import FIGURE_DIR, get_logger, ECONOMIC_DIR, NETWORK_DIR, LOG_DIR
 from satellite_fleet import SatelliteAltitudes
-from joblib import Parallel, delayed
 
 logger = get_logger(__name__, log_file="simulation.log")
 io = InputOutputModel(data_path=ECONOMIC_DIR)
@@ -21,6 +19,9 @@ io = InputOutputModel(data_path=ECONOMIC_DIR)
 # Helper Functions
 # -------------------------------------------------------------------------
 def select_failed_satellites(n_failures, weights, visible_sats):
+    """
+    Select satellites that have failed based on the given weights.
+    """
     weights = np.array(weights) / np.sum(weights)
     if n_failures == 0:
         return []  # No satellites failed
@@ -34,34 +35,6 @@ def select_failed_satellites(n_failures, weights, visible_sats):
 
 @jit(nopython=True)
 def calculate_capacity_metrics(
-    failed_sats_capacities,  # Capacities of failed sats within coverage
-    initial_total_capacity,  # Initial capacity for coverage area
-    failed_sats_total,  # Total failed satellites in constellation
-    total_constellation_sats,  # Total constellation size
-    min_coverage_sats,  # Minimum sats needed for coverage
-    degradation_factor,  # Steepness of sigmoid degradation
-):
-    # Direct capacity loss from failed satellites in coverage
-    failed_capacity = np.sum(failed_sats_capacities)
-    remaining_capacity = initial_total_capacity - failed_capacity
-
-    # Calculate coverage loss proportionally
-    coverage_loss_ratio = failed_sats_total / total_constellation_sats
-    lost_in_coverage = int(coverage_loss_ratio * min_coverage_sats)
-
-    # Sigmoid degradation model for capacity
-    midpoint = 0.5  # Sigmoid midpoint (50% constellation failures)
-    sigmoid_degradation = 1 / (
-        1 + np.exp(-degradation_factor * (coverage_loss_ratio - midpoint))
-    )
-
-    # Apply degradation to remaining capacity
-    remaining_capacity *= 1 - sigmoid_degradation
-    return remaining_capacity
-
-
-@jit(nopython=True)
-def calculate_capacity_metrics(
     failed_sats_capacities,  # Array of capacities for failed satellites (e.g., in Gbps)
     initial_total_capacity,  # Initial capacity for the coverage area (Gbps)
     failed_sats_total,  # Total number of failed satellites in the constellation
@@ -69,6 +42,9 @@ def calculate_capacity_metrics(
     min_coverage_sats,  # Minimum satellites required for effective coverage (unused here)
     degradation_factor,  # Additional degradation fraction (0 to 1)
 ):
+    """
+    Calculate the remaining capacity after satellite failures.
+    """
     # Direct capacity loss from the failed satellites
     failed_capacity = np.sum(failed_sats_capacities)
     remaining_capacity = initial_total_capacity - failed_capacity
@@ -116,7 +92,6 @@ def simulate_failure(
     failed_sats = select_failed_satellites(adjusted_failures, weights, visible_sats)
     if len(failed_sats) == 0:
         # No satellites failed, return initial capacity
-
         return {
             "capacity_gbps": initial_total_capacity,
             "capacity_per_cell_mbps": 0,
@@ -171,6 +146,7 @@ def simulate_failure(
         d_impact = va_results["Direct Impact"]
         i_impact = va_results["Indirect Impact"]
         t_impact = va_results["Total Impact"]
+        users_affected = impact["satellite_users_affected"]
 
         result = {
             "capacity_gbps": [remaining_capacity] * len(t_impact),
@@ -179,8 +155,7 @@ def simulate_failure(
             "cells_affected": [n_affected_cells] * len(t_impact),
             "cells_affected_pct": [n_affected_cells / total_cells * 100]
             * len(t_impact),
-            "satellite_users_affected": [float(impact["satellite_users_affected"])]
-            * len(t_impact),
+            "satellite_users_affected": [float(users_affected)] * len(t_impact),
             "total_economic_impact": t_impact,
             "direct_impact": d_impact,
             "indirect_impact": i_impact,
@@ -218,23 +193,30 @@ def run_parallel_simulations(
         "Running %d parallel simulations with %d failures each...", n_runs, n_failures
     )
 
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(simulate_failure)(
-            sats,
-            visible_sats,
-            n_failures,
-            capacities,
-            weights,
-            stats_df,
-            total_cells,
-            initial_total_capacity,
-            assigned_cells,
-            degradation_factor,
-            capacity_only,
-        )
-        for _ in tqdm(range(n_runs), desc="Economic impact simulations")
-    )
-
-    logger.info("Parallel simulations complete.")
+    results = []
+    with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+        futures = [
+            executor.submit(
+                simulate_failure,
+                sats,
+                visible_sats,
+                n_failures,
+                capacities,
+                weights,
+                stats_df,
+                total_cells,
+                initial_total_capacity,
+                assigned_cells,
+                degradation_factor,
+                capacity_only,
+            )
+            for _ in range(n_runs)
+        ]
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc="Economic impact simulations",
+        ):
+            results.append(future.result())
 
     return results

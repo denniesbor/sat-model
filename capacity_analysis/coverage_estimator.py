@@ -1,20 +1,22 @@
 # %%
 import os
-from satellite_fleet import SatelliteAltitudes
-from config import ECONOMIC_DIR, get_logger, FIGURE_DIR
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import pickle
 from tqdm import tqdm
 
-
+from satellite_fleet import SatelliteAltitudes
+from config import ECONOMIC_DIR, get_logger, FIGURE_DIR
 from viz import plot_satellite_visibility
 
 logger = get_logger(__name__, log_file="coverage_estimator.log")
 
+EARTH_RADIUS_KM = 6371
 
-def haversine_distance_and_components(lat1, lon1, lat2, lon2):
+def haversine_distance_and_components(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
     """
     Calculate great-circle distance between two points using the Haversine formula.
 
@@ -27,21 +29,17 @@ def haversine_distance_and_components(lat1, lon1, lat2, lon2):
     Returns:
         float: Distance between points in kilometers.
     """
-    R = 6371  # Earth's radius in km
-    # Convert degrees to radians
+    R = EARTH_RADIUS_KM
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-    # Calculate differences
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    # Haversine formula
     a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
     distance = R * c
     return distance
 
 
-# %%
-def get_conus_centroid(continental_us_states):
+def get_conus_centroid(continental_us_states) -> tuple:
     """
     Calculate the centroid of the continental United States.
 
@@ -53,7 +51,9 @@ def get_conus_centroid(continental_us_states):
     return center_lat, center_lon
 
 
-def calculate_elevation(ground_distance, altitude, R=6371):
+def calculate_elevation(
+    ground_distance: float, altitude: float, R: float = EARTH_RADIUS_KM
+) -> float:
     """
     Calculate satellite elevation angle from a ground point using spherical geometry.
 
@@ -78,7 +78,9 @@ def calculate_elevation(ground_distance, altitude, R=6371):
     return elevation
 
 
-def check_visibility_across_us(t, satellite_sats, bins, min_elevation=25):
+def check_visibility_across_us(
+    t: int, satellite_sats: dict, bins: np.ndarray, min_elevation: float = 25
+) -> dict:
     """
     Check satellite visibility across continental US grid points.
 
@@ -125,29 +127,26 @@ def check_visibility_across_us(t, satellite_sats, bins, min_elevation=25):
     return visible_by_plane
 
 
-def generate_satellite_distribution(n_sats):
+def generate_satellite_distribution(n_sats: int) -> tuple:
     """
     Generate satellite distribution into groups with a total count matching n_sats.
     """
-    # Define satellite distribution percentages
     distribution = {
-        "64QAM_high": 0.6,  # 60% of satellites use high spectral efficiency
-        "16APSK_mid": 0.3,  # 30% use mid-range efficiency
-        "QPSK_low": 0.1,  # 10% use lower efficiency
+        "64QAM_high": 0.6,
+        "16APSK_mid": 0.3,
+        "QPSK_low": 0.1,
     }
     modulation_efficiencies = {
-        "64QAM_high": 5.5547,  # Highest efficiency
-        "16APSK_mid": 2.967,  # Mid-range efficiency
-        "QPSK_low": 0.989,  # Lowest efficiency
+        "64QAM_high": 5.5547,
+        "16APSK_mid": 2.967,
+        "QPSK_low": 0.989,
     }
 
-    # Ensure total satellite count matches n_sats
     group_counts = {}
     total_assigned = 0
 
-    # Distribute satellites proportionally, ensuring rounding consistency
     for i, (key, percentage) in enumerate(distribution.items()):
-        if i == len(distribution) - 1:  # Assign remaining satellites to the last group
+        if i == len(distribution) - 1:
             count = n_sats - total_assigned
         else:
             count = round(n_sats * percentage)
@@ -157,7 +156,9 @@ def generate_satellite_distribution(n_sats):
     return group_counts, modulation_efficiencies
 
 
-def generate_satellite_capacity(n_sats, bandwidth_GHz=2.5):
+def generate_satellite_capacity(
+    n_sats: int, bandwidth_GHz: float = 2.5
+) -> tuple:
     """
     Generate satellite capacities using a bandwidth parameter.
     Bandwidth_GHz represents the available bandwidth (in GHz) per satellite.
@@ -167,15 +168,10 @@ def generate_satellite_capacity(n_sats, bandwidth_GHz=2.5):
     satellites = []
 
     for group, count in groups.items():
-        # Use the provided bandwidth to compute the base capacity.
-        # Here, base_capacity is in arbitrary capacity units (e.g., Gbps).
         base_capacity = bandwidth_GHz * efficiencies[group]
         for _ in range(int(count)):
-            variation_factor = np.random.beta(5, 2)  # Intrinsic satellite variability
-            degradation_factor = np.random.uniform(
-                0.7, 1.0
-            )  # Environmental degradation factor
-            # Adjust capacity while capping at the theoretical maximum (base_capacity)
+            variation_factor = np.random.beta(5, 2)
+            degradation_factor = np.random.uniform(0.7, 1.0)
             adjusted_capacity = (
                 base_capacity * degradation_factor * (0.7 + variation_factor * 0.6)
             )
@@ -187,7 +183,9 @@ def generate_satellite_capacity(n_sats, bandwidth_GHz=2.5):
     return np.array(capacities), weights
 
 
-def analyze_all_timestamps(satellite_sats, bins, n, constellation):
+def analyze_all_timestamps(
+    satellite_sats: dict, bins: np.ndarray, n: int, constellation: str
+) -> list:
     """
     Analyze satellite visibility across continental US for multiple timestamps.
 
@@ -195,7 +193,6 @@ def analyze_all_timestamps(satellite_sats, bins, n, constellation):
         satellite_sats: Dictionary of satellite data with positions and altitudes.
         bins: Altitude bin edges for grouping satellites.
         n: Number of timestamps to analyze.
-        save_path: Path to save/load analysis results (default: 'visibility_analysis.pkl').
 
     Returns:
         list: Analysis results for each timestamp containing:
@@ -207,7 +204,7 @@ def analyze_all_timestamps(satellite_sats, bins, n, constellation):
     save_path = ECONOMIC_DIR / f"{constellation.lower()}_visibility_analysis.pkl"
 
     if os.path.exists(save_path):
-        logger.info("Loading existing analysis from %s", save_path)
+        logger.info(f"Loading existing analysis from {save_path}")
         with open(save_path, "rb") as f:
             return pickle.load(f)
 
@@ -223,13 +220,13 @@ def analyze_all_timestamps(satellite_sats, bins, n, constellation):
                 for sat_id, sat_data in satellite_sats.items()
             )
             if not valid_timestamp:
-                logger.info("Skipping timestamp %d - beyond data range", t)
+                logger.info(f"Skipping timestamp {t} - beyond data range")
                 continue
 
             try:
                 visibility = check_visibility_across_us(t, satellite_sats, bins)
             except IndexError:
-                logger.warning("Index error for timestamp %d, skipping...", t)
+                logger.warning(f"Index error for timestamp {t}, skipping...")
                 continue
 
             for plane_idx, sats in visibility.items():
@@ -247,11 +244,11 @@ def analyze_all_timestamps(satellite_sats, bins, n, constellation):
             visibility_data.append(time_data)
 
         except Exception as e:
-            logger.error("Error processing timestamp %d: %s", t, str(e))
+            logger.error(f"Error processing timestamp {t}: {str(e)}")
             continue
 
     if visibility_data:
-        logger.info("Saving analysis to %s", save_path)
+        logger.info(f"Saving analysis to {save_path}")
         with open(save_path, "wb") as f:
             pickle.dump(visibility_data, f)
         logger.info("Analysis complete!")
@@ -261,7 +258,9 @@ def analyze_all_timestamps(satellite_sats, bins, n, constellation):
     return visibility_data
 
 
-def precompute_satellite_data(satellite_sats, stats_df, constellation, plot_fig=False):
+def precompute_satellite_data(
+    satellite_sats: dict, stats_df: pd.DataFrame, constellation: str, plot_fig: bool = False
+) -> dict:
     """
     Precompute satellite distribution and capacity data, save to a pickle file,
     and generate a satellite visibility plot.
@@ -269,38 +268,32 @@ def precompute_satellite_data(satellite_sats, stats_df, constellation, plot_fig=
     Args:
         satellite_sats (dict): Dictionary containing satellite data.
         stats_df (pd.DataFrame): Statistics DataFrame.
-        figure_dir (Path): Directory to save figures.
-        precompute_file (str): File path to save precomputed data (default: "precomputed_data.pkl").
+        constellation (str): Name of the satellite constellation.
+        plot_fig (bool): Whether to plot the satellite visibility figure.
 
     Returns:
         dict: Dictionary with precomputed data.
     """
-
     f_name = ECONOMIC_DIR / f"{constellation.lower()}_precomputed_data.pkl"
     if os.path.exists(f_name):
-        logger.info("Loading precomputed data from %s", f_name)
+        logger.info(f"Loading precomputed data from {f_name}")
         with open(f_name, "rb") as f:
             return pickle.load(f)
 
     logger.info("Precomputed data file not found; computing data...")
 
-    # satellties in constellation
     const_sats = satellite_sats[constellation]
-
-    # Calculate altitude bins based on median satellite heights
     median_heights = np.asarray([sat["median_altitude"] for sat in const_sats.values()])
     min_altitude = np.nanmin(median_heights)
     max_altitude = np.nanmax(median_heights)
-    bins = np.linspace(min_altitude, max_altitude, 9)  # 8 bins, 9 edges
+    bins = np.linspace(min_altitude, max_altitude, 9)
 
-    # Analyze timestamps using the 'times' from the second satellite in the dict
     n = len(list(const_sats.items())[1][1]["times"])
     time_indices = np.linspace(0, n - 1, 20, dtype=int)
     satellite_times = [list(const_sats.items())[1][1]["times"][i] for i in time_indices]
     visibility_data = analyze_all_timestamps(const_sats, bins, n, constellation)
     logger.info(f"Visibility analysis of {constellation} constellation is complete.")
 
-    # Compute total visible satellites for each analyzed timestamp
     satellite_counts = []
     for time_data, timestamp in zip(visibility_data, satellite_times):
         total_sats = sum(
@@ -320,7 +313,6 @@ def precompute_satellite_data(satellite_sats, stats_df, constellation, plot_fig=
     total_cells = len(stats_df)
     assigned_cells = (normalized_weights * total_cells).astype(int)
 
-    # Bundle precomputed data into a dictionary
     precomputed_data = {
         "precomputed_capacities": capacities,
         "precomputed_weights": weights,
@@ -333,14 +325,11 @@ def precompute_satellite_data(satellite_sats, stats_df, constellation, plot_fig=
         "visibility_df": visibility_df,
     }
 
-    # Save the precomputed data to a pickle file
     with open(f_name, "wb") as f:
         pickle.dump(precomputed_data, f)
-    logger.info("Precomputed data saved to %s", f_name)
+    logger.info(f"Precomputed data saved to {f_name}")
 
     if plot_fig:
-
-        # Plot satellite visibility
         plot_satellite_visibility(
             visibility_df,
             file_name=FIGURE_DIR / f"{constellation.lower()}_satellite_visibility.png",

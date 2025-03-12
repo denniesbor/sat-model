@@ -1,21 +1,22 @@
 # %%
-from config import ECONOMIC_DIR, NETWORK_DIR, get_logger
-from dataclasses import dataclass, field
+import os
+import pickle
 from pathlib import Path
-import pandas as pd
-import geopandas as gpd
+from dataclasses import dataclass, field
+
 import dask.dataframe as dd
 import dask_geopandas
-import os
+import geopandas as gpd
 import numpy as np
-import pickle
+import pandas as pd
 from tqdm import tqdm
 
+from config import ECONOMIC_DIR, get_logger
 from network_analysis.h3_grid import continental_hex_gdf, continental_us_states
 
 
 @dataclass
-class TECHNO_ECONOMICS:
+class TechnoEconomics:
     data_zcta_path: Path = ECONOMIC_DIR / "NAICS_EST_GDP2022_ZCTA.csv"
     pop_data_path: Path = ECONOMIC_DIR / "2020_decennial_census_at_ZCTA_level.csv"
     h3_stats_file: Path = ECONOMIC_DIR / "h3_stats.pkl"
@@ -233,7 +234,7 @@ class TECHNO_ECONOMICS:
 
 
 # %%
-economic_model = TECHNO_ECONOMICS()
+economic_model = TechnoEconomics()
 data_zcta, regions_pop_df = economic_model.read_data()
 zcta_business_gdf = economic_model.process_zcta_business_data(data_zcta)
 stats_df, continental_hex_gdf = economic_model.process_economic_model(
