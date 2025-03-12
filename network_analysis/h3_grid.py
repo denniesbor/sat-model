@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 from dataclasses import dataclass, field
+
 import geopandas as gpd
 import h3
 from shapely.geometry import Polygon
+
 from config import ECONOMIC_DIR, NETWORK_DIR, get_logger
 
 
@@ -36,7 +38,7 @@ class US_BOUNDARY:
         self.continental_states.to_crs(epsg=4326, inplace=True)
 
 
-def process_h3_grid(bbox, force_regenerate=False):
+def process_h3_grid(bbox: Tuple[float, float, float, float], force_regenerate: bool = False) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
     Generate or load H3 grid for continental US with specified resolution.
 
@@ -53,7 +55,7 @@ def process_h3_grid(bbox, force_regenerate=False):
     h3_grid_path = us_boundary.h3_grid_path
     conus_grid_path = us_boundary.conus_grid_path
 
-    def generate_hexagons_in_bbox(bbox, resolution):
+    def generate_hexagons_in_bbox(bbox: Tuple[float, float, float, float], resolution: int) -> set:
         """Generate H3 hexagons within bounding box."""
         hexagons = set()
         min_lon, min_lat, max_lon, max_lat = bbox
@@ -63,7 +65,7 @@ def process_h3_grid(bbox, force_regenerate=False):
                 hexagons.add(hex_id)
         return hexagons
 
-    def generate_initial_grid():
+    def generate_initial_grid() -> gpd.GeoDataFrame:
         """Generate initial H3 grid."""
         logger.info("Generating initial H3 grid...")
         hex_ids = generate_hexagons_in_bbox(bbox, us_boundary.h3_resolution)
@@ -73,7 +75,7 @@ def process_h3_grid(bbox, force_regenerate=False):
         ]
         return gpd.GeoDataFrame({"geometry": hex_polygons}, crs="EPSG:4326")
 
-    def get_conus_states():
+    def get_conus_states() -> gpd.GeoDataFrame:
         """Load and return continental US states."""
         logger.info("Loading CONUS states...")
         return us_boundary.continental_states

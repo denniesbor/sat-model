@@ -1,14 +1,17 @@
 # %%
-import pandas as pd
-import numpy as np
 import os
 import sys
-import pymsis
-from pymsis import msis
+import pickle
 from datetime import datetime
 from pathlib import Path
-from satellite_fleet.download_tles import process_and_save_satellite_data
+from dataclasses import dataclass, field
 
+import pandas as pd
+import numpy as np
+import pymsis
+from pymsis import msis
+
+from satellite_fleet.download_tles import process_and_save_satellite_data
 from config import (
     get_logger,
     space_track_login as login,
@@ -16,14 +19,9 @@ from config import (
     FIGURE_DIR,
     CONSTELLATIONS,
 )
-
-from dataclasses import dataclass, field
-import pickle
+from viz import plot_propellant_by_constellation
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-# Custom imports
-from viz import plot_propellant_by_constellation
 
 
 @dataclass
@@ -41,7 +39,6 @@ class SatelliteAltitudes:
     satellite_comparison_path: Path = field(
         default_factory=lambda: SATELLITE_DIR / "satellite_drag_comparison.csv"
     )
-
     logger: object = field(
         default_factory=lambda: get_logger(__name__, log_file="drag_estimates.log")
     )
@@ -56,20 +53,19 @@ class SatelliteAltitudes:
             self.logger.info("Loading satellite data from disk...")
             with open(self.satellite_alts_path, "rb") as f:
                 return pickle.load(f)
-        else:
-            self.logger.info("Downloading satellite data...")
-            satellite_alts = process_and_save_satellite_data(
-                username,
-                password,
-                self.storm_start,
-                self.storm_end,
-                constellations=self.constellations,
-                resolution=self.resolution,
-            )
-            with open(self.satellite_alts_path, "wb") as f:
-                pickle.dump(satellite_alts, f)
-            self.logger.info("Satellite data saved to disk.")
-            return satellite_alts
+        self.logger.info("Downloading satellite data...")
+        satellite_alts = process_and_save_satellite_data(
+            username,
+            password,
+            self.storm_start,
+            self.storm_end,
+            constellations=self.constellations,
+            resolution=self.resolution,
+        )
+        with open(self.satellite_alts_path, "wb") as f:
+            pickle.dump(satellite_alts, f)
+        self.logger.info("Satellite data saved to disk.")
+        return satellite_alts
 
 
 def classify_satellite_altitudes(satellite_data, num_bins=8):
@@ -110,7 +106,6 @@ def classify_satellite_altitudes(satellite_data, num_bins=8):
     return pd.DataFrame(satellite_classifications), bin_labels
 
 
-# %%
 def calculate_propellant_usage(results):
     """Calculate propellant usage from results dictionary."""
     try:
@@ -128,6 +123,7 @@ def calculate_propellant_usage(results):
 
 
 def calculate_drag_propellant(
+
     satellite_alts, condition="actual", Isp=4000, A=5, Cd=2.2, G=6.67430e-11, M=5.972e24
 ):
     """
@@ -249,7 +245,6 @@ def calculate_drag_propellant(
     return results
 
 
-# %%
 def load_or_calculate_results(satellite_data):
     # Try to load existing results
     if os.path.exists(satellite_data.satellite_propellant_path):
@@ -413,8 +408,6 @@ def compute_grouped_density_and_propellant(
     return grouped_df
 
 
-# %%
-
 if __name__ == "__main__":
     satellite_data = SatelliteAltitudes()
 
@@ -444,5 +437,3 @@ if __name__ == "__main__":
 
     file_name = FIGURE_DIR / "propellant_by_constellation.png"
     plot_propellant_by_constellation(grouped_df, file_name)
-
-# %%

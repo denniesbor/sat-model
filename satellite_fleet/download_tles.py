@@ -1,29 +1,22 @@
-# %%
 import time
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
-from skyfield.api import load, EarthSatellite, Topos
-from skyfield.positionlib import Geocentric
+from skyfield.api import load, EarthSatellite
+from skyfield.framelib import itrs
 from tqdm import tqdm
 import pytz
 import requests
 import logging
+import os
+from pathlib import Path
+from typing import List, Dict
+import pickle
 import httpx
 
 import spacetrack.operators as op
 from spacetrack import SpaceTrackClient
-from skyfield.api import load, EarthSatellite
-from skyfield.api import wgs84
-from skyfield.framelib import itrs
 
-import os
-from pathlib import Path
-from dataclasses import dataclass
-from typing import List, Dict
-import pickle
-
-# Configs
 from config import get_logger, space_track_login as login, SATELLITE_DIR, CONSTELLATIONS
 
 logger = get_logger(__name__, log_file="download_tles.log")
@@ -31,7 +24,6 @@ logger = get_logger(__name__, log_file="download_tles.log")
 eph = load(str(SATELLITE_DIR / "de421.bsp"))
 
 
-# %%
 def fetch_satellite_tles(category="starlink"):
     """
     Fetch satellite IDs and TLEs from CelesTrak for a given category.
@@ -68,7 +60,6 @@ def fetch_tle_data(norad_id, username, password, start_date=None, end_date=None)
     base_url = "https://www.space-track.org"
     login_url = f"{base_url}/ajaxauth/login"
 
-    # If no TLEs found in time range, fetch latest TLE
     with requests.Session() as session:
         session.post(login_url, data={"identity": username, "password": password})
         if start_date and end_date and start_date.date() == end_date.date():
@@ -91,7 +82,6 @@ def fetch_tle_data(norad_id, username, password, start_date=None, end_date=None)
             )
         response = session.get(query_url).text
 
-        # If no TLEs found, get latest
         if not response.strip():
             query_url = (
                 f"{base_url}/basicspacedata/query/class/tle_latest/"
@@ -133,7 +123,6 @@ def get_bulk_satellite_tles(
             with SpaceTrackClient(identity=username, password=password) as st:
                 if start_date and end_date:
                     epoch_range = f"{start_date.strftime('%Y-%m-%d')}--{end_date.strftime('%Y-%m-%d')}"
-                    # Use gp_history for historical data.
                     tle = st.gp_history(
                         object_name=op.like(satellite_type),
                         epoch=epoch_range,
@@ -141,7 +130,6 @@ def get_bulk_satellite_tles(
                         format="tle",
                     )
                 else:
-                    # Use gp for current active satellites.
                     tle = st.gp(
                         object_name=op.like(satellite_type),
                         decay_date="null-val",
@@ -183,38 +171,27 @@ def organize_tle_data(tle_string):
                 }
             }
     """
-    # Split into lines and remove empty lines
     lines = [line.strip() for line in tle_string.split("\n") if line.strip()]
-
-    # Dictionary to store organized data
     satellites = {}
 
-    # Process lines in pairs
     for i in range(0, len(lines), 2):
-        if i + 1 >= len(lines):  # Skip incomplete pairs
+        if i + 1 >= len(lines):
             break
 
         line1 = lines[i]
         line2 = lines[i + 1]
 
-        # Extract satellite ID and name from Line 1
-        # Line 1 format: 1 NNNNNC NNNNNAAA NNNNN.NNNNNNNN +.NNNNNNNN +NNNNN-N +NNNNN-N N NNNNN
-        sat_id = line1[2:7].strip()  # NORAD Catalog Number
-
-        # Extract epoch from Line 1
+        sat_id = line1[2:7].strip()
         year = int("20" + line1[18:20])
         day_of_year = float(line1[20:32])
         epoch = datetime(year, 1, 1) + timedelta(days=day_of_year - 1)
 
-        # If this is a new satellite, initialize its entry
         if sat_id not in satellites:
             satellites[sat_id] = {"name": f"STARLINK-{sat_id}", "tles": []}
 
-        # Add this TLE set to the satellite's data
         tle_data = {"epoch": epoch, "line1": line1, "line2": line2}
         satellites[sat_id]["tles"].append(tle_data)
 
-    # Sort TLEs by epoch for each satellite
     for sat_id in satellites:
         satellites[sat_id]["tles"].sort(key=lambda x: x["epoch"])
 
@@ -247,7 +224,6 @@ def process_and_save_satellite_data(
     for constellation in constellations:
         logger.info(f"Fetching historical TLE data for {constellation}...")
 
-        # Fetch historical constellation data
         historical_tles = get_bulk_satellite_tles(
             constellation,
             username,
@@ -257,10 +233,8 @@ def process_and_save_satellite_data(
         )
         logger.info(f"Fetching historical data for {constellation}... Done")
 
-        # Organize TLE data
         tle_data = organize_tle_data(historical_tles)
 
-        # Check if altitude data exists
         pickle_filename = SATELLITE_DIR / f"{constellation.lower()}_altitudes.pkl"
 
         if os.path.exists(pickle_filename):
@@ -269,30 +243,18 @@ def process_and_save_satellite_data(
         else:
             logger.info(f"Calculating altitudes for {constellation}...")
 
-            # Compute satellite altitudes
             constellation_altitudes = calculate_satellite_altitudes_parallel(
                 tle_data, storm_start, storm_end, step_minutes=resolution
             )
 
-            # Store in dictionary
             all_satellite_altitudes[constellation] = constellation_altitudes
 
-            # Save results to a file
             logger.info(f"Saving {constellation} altitudes to {pickle_filename}...")
             with open(pickle_filename, "wb") as f:
                 pickle.dump(constellation_altitudes, f)
 
-        # Sleep to prevent overwhelming API (adjust sleep duration if needed)
         logger.info(f"Sleeping for 2 seconds before processing next constellation...")
         time.sleep(2)
-
-    # print("Fetching current data...")
-    # # Fetch current Starlink data
-    # current_tles = get_bulk_satellite_tles("STARLINK", username, password)
-
-    # print("Fetching ISS data...")
-    # # Fetch ISS (Zarya) data
-    # tle_data_zarya = fetch_tle_data(25544, username, password, storm_start, storm_end)
 
     return all_satellite_altitudes
 
@@ -301,7 +263,6 @@ def preprocess_tle_data(sat_data, ts, window_start, window_end):
     """Preprocess TLE data for a satellite"""
     tle_with_epochs = []
 
-    # Process each TLE once
     for tle in sat_data["tles"]:
         sat = EarthSatellite(tle["line1"], tle["line2"], sat_data["name"], ts)
         epoch = sat.epoch.utc_datetime()
@@ -309,7 +270,6 @@ def preprocess_tle_data(sat_data, ts, window_start, window_end):
             epoch = pytz.UTC.localize(epoch)
         tle_with_epochs.append({"epoch": epoch, "sat_obj": sat})
 
-    # Sort and create validity intervals
     sorted_tles = sorted(tle_with_epochs, key=lambda x: x["epoch"])
     tle_intervals = []
 
@@ -355,13 +315,10 @@ def is_in_earth_shadow(satellite, t, eph):
 def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end):
     """Process single satellite data with added velocities and Cartesian coordinates"""
     logger.info(f"Processing satellite {sat_id}...")
-    # Load timescale once
-    # Pre-compute time objects
     ts_times = [
         ts.utc(t.year, t.month, t.day, t.hour, t.minute, t.second) for t in time_steps
     ]
 
-    # Initialize arrays for better performance
     n_steps = len(time_steps)
     latitudes = np.zeros(n_steps)
     longitudes = np.zeros(n_steps)
@@ -379,12 +336,10 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
     valid_indices = []
     is_in_shadow = np.zeros(n_steps)
 
-    # Preprocess TLE data
     sorted_tles, tle_intervals = preprocess_tle_data(
         sat_data, ts, window_start, window_end
     )
 
-    # Process each timestep
     for i, (t, ts_time) in enumerate(zip(time_steps, ts_times)):
         valid_tle = find_valid_tle(t, tle_intervals, sorted_tles)
 
@@ -393,32 +348,26 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
             position = sat_obj.at(ts_time)
             subpoint = position.subpoint()
 
-            # Geodetic (lat, lon, alt)
             latitudes[i] = subpoint.latitude.degrees
             longitudes[i] = subpoint.longitude.degrees
             altitudes[i] = subpoint.elevation.km
 
-            # Convert to Earth-fixed (ECEF) frame for drag calculations
             itrs_position = position.frame_xyz(itrs)
             x_ecef, y_ecef, z_ecef = itrs_position.km
             x, y, z = (
                 x_ecef * 1000.0,
                 y_ecef * 1000.0,
                 z_ecef * 1000.0,
-            )  # Convert to meters
+            )
 
-            # Get velocity in ECEF frame
-            itrs_velocity = position.frame_xyz_and_velocity(itrs)[
-                1
-            ]  # Extract velocity part
+            itrs_velocity = position.frame_xyz_and_velocity(itrs)[1]
             vx_ecef, vy_ecef, vz_ecef = itrs_velocity.km_per_s
             vx, vy, vz = (
                 vx_ecef * 1000.0,
                 vy_ecef * 1000.0,
                 vz_ecef * 1000.0,
-            )  # Convert to m/s
+            )
 
-            # Store in dictionary
             cartesian_positions["x"][i] = x
             cartesian_positions["y"][i] = y
             cartesian_positions["z"][i] = z
@@ -432,7 +381,6 @@ def process_satellite(sat_id, sat_data, time_steps, ts, window_start, window_end
 
             valid_indices.append(i)
 
-    # Trim arrays to valid indices
     valid_indices = np.array(valid_indices)
     if len(valid_indices) > 0:
         latitudes = latitudes[valid_indices]
@@ -470,10 +418,8 @@ def calculate_satellite_altitudes_parallel(
     satellites_dict, window_start, window_end, step_minutes=30, num_workers=12
 ):
     """Calculate satellite positions in parallel"""
-    # Load timescale once
     ts = load.timescale()
 
-    # Ensure proper timezone
     try:
         window_start = pytz.UTC.localize(window_start)
     except ValueError:
@@ -483,14 +429,12 @@ def calculate_satellite_altitudes_parallel(
     except ValueError:
         pass
 
-    # Generate time steps
     time_steps = []
     current_time = window_start
     while current_time <= window_end:
         time_steps.append(current_time)
         current_time += timedelta(minutes=step_minutes)
 
-    # Process satellites in parallel
     altitude_data = {}
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {
@@ -523,13 +467,11 @@ def calculate_satellite_altitudes_parallel(
 if __name__ == "__main__":
     username, password = login()
 
-    # For Gannon storm / historical data:
     storm_start = datetime(2024, 5, 9)
     storm_end = datetime(2024, 5, 13)
 
     resolution = 10
 
-    # Fetch and process satellite data
     satellite_alts = process_and_save_satellite_data(
         username,
         password,
