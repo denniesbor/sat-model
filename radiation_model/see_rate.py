@@ -1,12 +1,11 @@
-# %%
 import os
 import sys
 import pandas as pd
-import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Tuple, Optional
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 # Custom imports
 from viz import custom_line_plots
 
@@ -74,21 +73,22 @@ class EnergyData:
         }
     )
 
-    def get_soho_stereo_band(self, energy_range: str) -> SOHO_STEREO_Band:
+    def get_soho_stereo_band(self, energy_range: str) -> Optional[SOHO_STEREO_Band]:
         """Fetch SOHO-STEREO energy band safely."""
-        return self.soho_stereo_bands.get(energy_range, None)
+        return self.soho_stereo_bands.get(energy_range)
 
-    def get_epam_energy_range(self, channel: str) -> str:
+    def get_epam_energy_range(self, channel: str) -> Optional[str]:
         """Fetch energy range for a given EPAM channel."""
         return (
-            self.epam_energies.get(channel, None).range
+            self.epam_energies.get(channel).range
             if channel in self.epam_energies
             else None
         )
 
 
-# Load data
-def load_and_process_data():
+def load_and_process_data() -> (
+    Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]
+):
     """
     Load, reconcile SOHO & STEREO energy bands, rename EPAM columns using EnergyData, and return processed DataFrames.
 
@@ -103,25 +103,9 @@ def load_and_process_data():
 
         energy_data = EnergyData()
 
-        # Rename EPAM columns using EnergyData
-        # df_epam.rename(
-        #     columns={
-        #         k: v.range
-        #         for k, v in energy_data.epam_energies.items()
-        #         if k in df_epam.columns
-        #     },
-        #     inplace=True,
-        # )
-
         epam_cols = list(energy_data.epam_energies.keys())
 
         # Get only the renamed columns and datetime column
-        renamed_cols = [
-            v.range
-            for v in energy_data.epam_energies.values()
-            if v.range in df_epam.columns
-        ]
-
         df_epam = df_epam[["datetime"] + epam_cols]
 
         # Reconcile SOHO & STEREO bands
@@ -147,16 +131,12 @@ def load_and_process_data():
         return None, None, None
 
 
-# %%
-
-# %%
 if __name__ == "__main__":
     # Load the energy bands and EPAM energies
     df_soho, df_stereo, df_epam = load_and_process_data()
     if df_soho is None or df_stereo is None or df_epam is None:
         logger.error("One or more data files could not be loaded.")
     else:
-        # Import or define EnergyData if not already in this file.
         energy_data = EnergyData()  # Instantiate the unified energy mappings.
         # custom_line_plots(
         #     df_epam,
@@ -166,5 +146,3 @@ if __name__ == "__main__":
         #     logger,
         #     filename=FIGURE_DIR / "epam_soho_stereo.png",
         # )
-
-# %%

@@ -25,7 +25,6 @@ sat_alts_path = SATELLITE_DIR / "satellite_alts.pkl"
 with open(sat_alts_path, "rb") as f:
     satellite_alts = pickle.load(f)
 
-
 eph = load(str(SATELLITE_DIR / "de421.bsp"))
 simulation_dir = SATELLITE_DIR / "simulation_data"
 simulation_dir.mkdir(exist_ok=True)
@@ -195,11 +194,12 @@ def weibull_distribution(p, p_max, shape=1.5):
     )
     return pdf_full / cdf_pmax
 
+    # %%
+    # -----------------------------------------------------------
+    # 4) Main upset-rate computation (Adams-like method)
+    # -----------------------------------------------------------
 
-# %%
-# -----------------------------------------------------------
-# 4) Main upset-rate computation (Adams-like method)
-# -----------------------------------------------------------
+
 def calculate_upset_rate_time_series(let_df, params):
     """
     Calculate upset rate vs time using an RPP model, triangular p(L) distribution, and
@@ -273,7 +273,7 @@ def compute_dose(differential_let_df, dt_seconds):
 
     Args:
         differential_let_df: DataFrame with columns labeled like 'LET_xx.xx'
-                             and differential flux values.
+                                and differential flux values.
         dt_seconds: Time interval in seconds.
 
     Returns:
@@ -293,25 +293,53 @@ def compute_dose(differential_let_df, dt_seconds):
     return dose_series
 
 
-def apply_stormer_scaling(df_flux, lat, rigidity_ref=14.5, k=95, alpha=0.7):
-    # Compute cutoff rigidity (GV) using a vectorized Stormer formula
-    R_c = rigidity_ref * (np.cos(np.radians(lat)) ** 4)
-    E_cut = R_c * 1000.0  # Convert cutoff rigidity to energy threshold (MeV)
+def apply_stormer_scaling(df_flux, lat, alt, rigidity_ref=14.5, k=95, alpha=0.7):
+    """
+    Apply a simplified geomagnetic cutoff scaling based on latitude and altitude.
 
-    # Extract LET values from column names using vectorized operations
+    This uses a vertical cutoff rigidity approximation derived from the Störmer formula,
+    with an altitude correction factor.
+
+    Args:
+        df_flux (pd.DataFrame): DataFrame whose columns are labeled like 'LET_10', representing LET bins.
+        lat (array-like): Latitudes (in degrees) for each row in df_flux.
+        alt (array-like): Altitudes (in km) for each row in df_flux.
+        rigidity_ref (float): Reference cutoff rigidity at sea level (in GV). Default is 14.5 GV.
+        k (float): Parameter for converting LET to representative energy.
+        alpha (float): Exponent for converting LET to representative energy.
+
+    Returns:
+        pd.DataFrame: Flux DataFrame scaled by the geomagnetic cutoff.
+
+    The cutoff rigidity (R_c) is given by:
+        R_c = rigidity_ref * cos(lat)^4 * (R_E / (R_E + alt))^2,
+    where R_E is Earth's mean radius (~6371 km). The energy cutoff (E_cut) in MeV is:
+        E_cut = R_c * 1000.0
+    For each LET bin (extracted from column names), a representative energy (E_bin) is computed:
+        E_bin = (k / LET_value)^(1 / alpha)
+    The scaling factor for each row and column is:
+        scale_factor = E_bin / E_cut, if E_bin < E_cut; otherwise 1.0.
+    """
+
+    R_E = 6371.0  # Earth's radius in km
+
+    # Calculate cutoff rigidity with altitude correction
+    R_c = rigidity_ref * (np.cos(np.radians(lat)) ** 4) * (R_E / (R_E + alt)) ** 2
+    E_cut = R_c * 1000.0  # Convert GV to MeV
+
+    # Extract LET values from column names (assumes columns like 'LET_10', etc.)
     let_vals = np.array(
         [float(col.split("_")[1]) if "_" in col else np.nan for col in df_flux.columns]
     )
 
-    # Compute representative energy for each LET value
+    # Compute representative energy for each LET bin (MeV)
     E_bin = (k / let_vals) ** (1 / alpha)
 
-    # Compute scale factor matrix for all latitudes and LET values
+    # E_cut has shape (n_rows,). Reshape to (n_rows, 1) for broadcasting with E_bin (shape (n_cols,))
     scale_factors = np.where(E_bin < E_cut[:, None], E_bin / E_cut[:, None], 1.0)
 
-    # Apply scaling efficiently using broadcasting
+    # Apply scaling using broadcasting
     scaled_df = df_flux * scale_factors
-
     return scaled_df
 
 
@@ -320,20 +348,28 @@ def process_single_satellite(
 ):
     sat_times = pd.to_datetime(sat_info["times"])
     sat_lats = np.array(sat_info["latitudes"])
+    sat_alts = np.array(sat_info["altitudes"])
     shadow_flag = np.array(
         sat_info.get("is_in_shadow", np.zeros_like(sat_times))
     )  # Ensure array compatibility
     shadow_scale = np.where(shadow_flag == 1, 0.1, 1.0)  # Vectorized scaling
 
-    # Reindex global differential LET to satellite times using nearest method
-    sat_flux = let_diff.reindex(sat_times, method="nearest")
+    start_time = let_diff.index.min()
+    end_time = let_diff.index.max()
+    mask = (sat_times >= start_time) & (sat_times <= end_time)
+    valid_sat_times = sat_times[mask]
+    valid_sat_lats = sat_lats[mask]
+    valid_shadow_scale = shadow_scale[mask]  # Ensure same length
+    valid_sat_alts = sat_alts[mask]
+
+    sat_flux = let_diff.reindex(valid_sat_times, method="nearest")
 
     # Apply Stormer scaling for all times at once
     stormer_scaled = apply_stormer_scaling(
-        sat_flux, sat_lats
+        sat_flux, valid_sat_lats, valid_sat_alts
     )  # Assuming function supports vectorization
     scaled_flux = stormer_scaled.multiply(
-        shadow_scale, axis=0
+        valid_shadow_scale, axis=0
     )  # Element-wise multiplication
 
     # Compute integrated LET and other values
@@ -344,38 +380,36 @@ def process_single_satellite(
     return (constellation, sat_id, {"upset": upset_ts, "dose": dose_ts})
 
 
+def process_satellite_task(task):
+    # Unpack the task tuple
+    constellation, sat_id, sat_info, let_diff, params, dt_seconds = task
+    return process_single_satellite(
+        constellation, sat_id, sat_info, let_diff, params, dt_seconds
+    )
+
+
 def compute_dose_radiation_all_assets(satellite_alts, dt_seconds, params, let_diff):
+    # Build a list of tasks (one per satellite)
+    tasks = []
+    for constellation in CONSTELLATIONS:
+        sat_dict = satellite_alts[constellation]
+        for sat_id, sat_info in sat_dict.items():
+            tasks.append(
+                (constellation, sat_id, sat_info, let_diff, params, dt_seconds)
+            )
 
-    results = {}
-    futures = []
-
-    total_sats = sum(len(satellite_alts[const]) for const in CONSTELLATIONS)
+    total_sats = len(tasks)
     logger.info(f"Processing {total_sats} satellites...")
 
+    results = {}
     with ProcessPoolExecutor(max_workers=6) as executor:
-        for constellation in CONSTELLATIONS:
-            sat_dict = satellite_alts[constellation]
-            for sat_id, sat_info in sat_dict.items():
-                futures.append(
-                    executor.submit(
-                        process_single_satellite,
-                        constellation,
-                        sat_id,
-                        sat_info,
-                        let_diff,
-                        params,
-                        dt_seconds,
-                    )
-                )
-
-        for future in tqdm(
-            as_completed(futures), total=len(futures), desc="Processing Satellites"
+        # Use executor.map to process tasks in a vectorized manner
+        for constellation, sat_id, res in tqdm(
+            executor.map(process_satellite_task, tasks),
+            total=total_sats,
+            desc="Processing Satellites",
         ):
-            try:
-                constellation, sat_id, res = future.result()
-                results.setdefault(constellation, {})[sat_id] = res
-            except Exception as e:
-                logger.error(f"Error processing satellite: {e}")
+            results.setdefault(constellation, {})[sat_id] = res
 
     logger.info("Finished processing all satellites.")
     return results
@@ -387,7 +421,7 @@ if __name__ == "__main__":
     # Define return periods to scale fluxes
     return_periods = [30, 50, 75, 100, 150, 250]
     baseline_period = 30  # Given event is a 1/30-year event
-    gamma = 0.4  # Scaling exponent (adjustable)
+    gamma = 0.5  # Scaling exponent (adjustable)
 
     # Load initial flux data
     df_soho, df_stereo, df_epam = load_and_process_data()
@@ -410,8 +444,8 @@ if __name__ == "__main__":
         "n_components": 50,
     }
 
-    n_components_values = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    lambda_base_values = [1 / 2000, 1 / 1500, 1 / 1000, 1 / 500]
+    n_components_values = [25, 50, 75, 100]
+    lambda_base_values = [1 / 10000, 1 / 5000, 1 / 1000]
     beta_values = [0.3, 0.5, 0.7]
 
     param_combinations = list(
@@ -425,7 +459,7 @@ if __name__ == "__main__":
     n_sample = 5  # Number of parameter sets to sample per return period
 
     for T in return_periods:
-        scaling_factor = (baseline_period / T) ** gamma
+        scaling_factor = (T / baseline_period) ** gamma
         let_differential_scaled = let_differential_base * scaling_factor
 
         logger.info(
@@ -477,4 +511,4 @@ if __name__ == "__main__":
                 pickle.dump({key: results}, f, protocol=pickle.HIGHEST_PROTOCOL)
             logger.info(f"Saved results for 1/{T}-year event to {filename}")
 
-# %%
+    # %%
