@@ -3,11 +3,12 @@
 ## Overview
 
 This project conducts a sensitivity analysis of LEO satellites under space weather events using three main modules. 
-1. A radiation model estimates Single Event Effects (SEE) by fitting Weibull or triangular distributions to flux data from SOHO, ACE, and STEREO and computes dosimetry based on differential LET. It also implements a crude version of the CREME96 IRPP approach for radiation analysis. Magnetic rigidity and the impact of Earth's shadow are accounted for by scaling the differential fluxes with a simplified Stormer model. 
-2. A network analysis then evaluates satellite coverage, network capacity degradation, and the cascading economic impacts of satellite failures. 
-3. A satellite fleet analysis assesses atmospheric drag and propellant usage using the MSIS model and SGP4 propagation. 
+1. **A radiation model** estimates Single Event Effects (SEE) by fitting Weibull or triangular distributions to flux data from SOHO, ACE, and STEREO and computes dosimetry based on differential LET. It also implements a crude version of the CREME96 IRPP approach for radiation analysis. Magnetic rigidity and the impact of Earth's shadow are accounted for by scaling the differential fluxes with a simplified Stormer model. 
+2. **A network analysis** then evaluates satellite coverage, network capacity degradation, and the cascading economic impacts of satellite failures. 
+3. **A satellite fleet analysis** assesses atmospheric drag and propellant usage using the MSIS model and SGP4 propagation. 
 
-Figure 1 below illustrates the methodological framework of the project.  
+Below, Figure 1 illustrates the methodological framework of the project.  
+
 ![Methodology Figure](viz/figures/box.png)
 _Figure 1_
 
