@@ -136,6 +136,6 @@ Figures 3 and 4 below indicate the satellite coverage area within the US and zoo
 - A cumulative failure probability threshold, based on Poisson statistics, is applied in predicting the number of satellite failures under storm conditions.
 - Failed satellites are mapped to affected H3 grid cells. With an estimated 2 million satellite users in the US, we approximate the affected population for _n_ satellite failures.
 - The economic model assumes a loss of productivity for users relying on satellite internet connectivity. This is quantified by shocking the supply and demand tables from the BEA using input–output models to capture both the direct and indirect economic impacts, as shown in Figure 7.
-  ![figure six](viz/figures/economic_impact.png?raw=true | width=600)  
+<img src="viz/figures/economic_impact.png" alt="Figure Six" width="600">
    _Figure 7_
 
