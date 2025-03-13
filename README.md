@@ -91,6 +91,42 @@ The project directory is organized as follows:
 └── data
 ```
 
-## Additional Information
+## Final Model Outputs
 
-Drag estimates are calculated assuming Xenon fuel with an Isp of 4.4. The radiation model implements a variant of the CREME96 IRPP model, and the network analysis uses the Uber H3 algorithm for spatial discretization. For more information please review the individual scripts.
+**Network Capacity**
+
+- Satellite coverage is modeled using a minimum elevation of 25° for antenna reception on the ground. For each LEO shell at distinct altitudes, the orbital position on the horizon defines the maximum coverage area for the gridded contiguous US polygon.
+- The Uber H3 (hexagonal) grid model is applied to discretize the ground coverage of a single satellite beam. The contiguous United States is divided into resolution-5 hexagonal grids (~252 km² each; ~32,000 cells total) to ensure complete internet coverage.
+- Satellites are propagated over a 3-day window at intervals of 20 minutes. The number of satellites located during these periods within the coverage area is recorded and averaged over all examined periods to obtain the number of required satellites to ensure uninterrupted service availability. Figure one below indicates the count of visible satellites within the contiguous US.
+- [figure one](viz/figures/satellite_visibility.png)  
+  _Figure 1_
+- Assuming failures are uniformly distributed in space, the loss in coverage is estimated as:  
+   \[
+  \text{Lost Satellites} = \left(\frac{\text{Min Satellites in Coverage}}{\text{Total Satellites}}\right) \times n\_{\text{failures}}
+  \]  
+   The number of affected cells is estimated as:  
+   \[
+  \text{Cells Affected} = \text{Lost Satellites} \times \left(\frac{32\,000}{\text{Satellites in Coverage}}\right)
+  \]  
+  Figures two and three below indicate the satellite coverage area within the US and zoomed-in H3 gridded regions, respectively.
+- [figure two](viz/figures/satellite_visibility_map.png)  
+  _Figure 2_
+- [figure three](viz/figures/small_region_coverage_map.png)  
+  _Figure 3_
+
+**Radiation Outputs**
+
+- Radiation data is sourced from three sensors operating in distinct regions of solar space: SOHO and ACE are positioned near the Sun–Earth Lagrange point L1, while STEREO A is operating in a heliocentric orbit.
+- For the May 2024 Gannon storm (a 1-in-30-year event), differential fluxes recorded by these sensors are integrated to obtain the integral flux, which is then converted to stopping power assuming critical nodes are composed of silicon components.
+- A lognormal extrapolation is applied to extract extreme value statistics. The radiation model implements a variant of the CREME96 IRPP models. The upset rate is a function of particle path length, energy flux, stopping power, and material properties. A Monte Carlo simulation is adopted to test different sensitivities.
+- Upset rates over the entire time series are converted via Poisson processes into the probability distributions of component failure per exposure. Moreover, the computed LET spectra is then applied to estimate the dose rates in J/kg. Figure four below indicates SEE and radiation dose rates.
+- [figure four](viz/figures/dose_rates.png)  
+  _Figure 4_
+
+**Impact Analysis**
+
+- A cumulative failure probability threshold, based on Poisson statistics, is applied in predicting the number of satellite failures under storm conditions.
+- Failed satellites are mapped to affected H3 grid cells. With an estimated 2 million satellite users in the US, we approximate the affected population for _n_ satellite failures.
+- The economic model assumes a loss of productivity for users relying on satellite internet connectivity. This is quantified by shocking the supply and demand tables from the BEA using input–output models to capture both the direct and indirect economic impacts, as shown in Figure 5.
+- [figure five](viz/figures/economic_impact.png)  
+  _Figure 5_
